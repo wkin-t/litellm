@@ -496,7 +496,49 @@ class LiteLLMCompletionResponsesConfig:
 
                         deduped_in_place.append(m)
 
-                    messages.extend(deduped_in_place)
+                    #########################################################
+                    # Insert this tool response right after the assistant message that
+                    # declared its tool_call_id (at the end of that assistant's existing
+                    # contiguous tool-message block), instead of always appending to the
+                    # very end of `messages`.
+                    #
+                    # Without this, any message appended between an assistant's tool_calls
+                    # declaration and this tool response (e.g. a plain assistant message
+                    # produced by a later merge, or a message from a different, later turn)
+                    # breaks the "an assistant message with tool_calls must be immediately
+                    # followed by matching tool messages" requirement that OpenAI-compatible
+                    # Chat Completions backends enforce, causing a 400 even though every
+                    # tool_call_id is, in isolation, correctly paired somewhere in the list.
+                    #########################################################
+                    _output_call_id = str(_input.get("call_id") or _input.get("id") or "")
+                    _insert_idx = len(messages)
+                    if _output_call_id:
+                        for _i, _msg in enumerate(messages):
+                            _role = _msg.get("role") if isinstance(_msg, dict) else getattr(_msg, "role", None)
+                            if _role != "assistant":
+                                continue
+                            _tcs = (
+                                _msg.get("tool_calls") if isinstance(_msg, dict) else getattr(_msg, "tool_calls", None)
+                            )
+                            if not _tcs:
+                                continue
+                            _ids = [
+                                tc.get("id") if isinstance(tc, dict) else getattr(tc, "id", None) for tc in _tcs
+                            ]
+                            if _output_call_id in _ids:
+                                _j = _i + 1
+                                while _j < len(messages):
+                                    _next_role = (
+                                        messages[_j].get("role")
+                                        if isinstance(messages[_j], dict)
+                                        else getattr(messages[_j], "role", None)
+                                    )
+                                    if _next_role != "tool":
+                                        break
+                                    _j += 1
+                                _insert_idx = _j
+                                break
+                    messages[_insert_idx:_insert_idx] = deduped_in_place
                     continue
 
                 messages.extend(chat_completion_messages)
